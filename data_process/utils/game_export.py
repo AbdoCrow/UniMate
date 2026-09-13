@@ -335,4 +335,136 @@ def export_game_obj_sequence(dirpath, vertices, faces, uvs=None, normals=None,
         )
 
 
+def euler_zxy_degrees_to_matrix(pitch_x, yaw_y, roll_z):
+    """Construct 3x3 rotation matrix from Euler angles in degrees
+    using CMPS346 rotation order Z -> X -> Y:
+    R = R_y(yaw) @ R_x(pitch) @ R_z(roll)
+    """
+    rx = np.radians(pitch_x)
+    ry = np.radians(yaw_y)
+    rz = np.radians(roll_z)
+
+    cx, sx = np.cos(rx), np.sin(rx)
+    cy, sy = np.cos(ry), np.sin(ry)
+    cz, sz = np.cos(rz), np.sin(rz)
+
+    Mx = np.array([
+        [1.0, 0.0, 0.0],
+        [0.0,  cx, -sx],
+        [0.0,  sx,  cx],
+    ], dtype=np.float64)
+
+    My = np.array([
+        [ cy, 0.0,  sy],
+        [0.0, 1.0, 0.0],
+        [-sy, 0.0,  cy],
+    ], dtype=np.float64)
+
+    Mz = np.array([
+        [ cz, -sz, 0.0],
+        [ sz,  cz, 0.0],
+        [0.0, 0.0, 1.0],
+    ], dtype=np.float64)
+
+    return My @ Mx @ Mz
+
+
+def matrix_to_euler_zxy_degrees(mat):
+    """Extract Euler angles (pitch_x, yaw_y, roll_z) in degrees
+    from a 3x3 rotation matrix for the CMPS346 convention:
+    R = R_y(yaw) @ R_x(pitch) @ R_z(roll)
+    """
+    R = np.asarray(mat, dtype=np.float64)[:3, :3]
+
+    # Normalize columns to eliminate scale
+    for c in range(3):
+        norm = np.linalg.norm(R[:, c])
+        if norm > 1e-12:
+            R[:, c] /= norm
+
+    # R[1, 2] = -sin(pitch_x)
+    sin_x = np.clip(-R[1, 2], -1.0, 1.0)
+    pitch_x = np.arcsin(sin_x)
+    cos_x = np.cos(pitch_x)
+
+    if np.abs(cos_x) > 1e-6:
+        # R[1, 0] = cos(x) * sin(z), R[1, 1] = cos(x) * cos(z)
+        roll_z = np.arctan2(R[1, 0], R[1, 1])
+        # R[0, 2] = sin(y) * cos(x), R[2, 2] = cos(y) * cos(x)
+        yaw_y = np.arctan2(R[0, 2], R[2, 2])
+    else:
+        # Gimbal lock: pitch_x is +-90 degrees
+        yaw_y = 0.0
+        roll_z = np.arctan2(-R[0, 1], R[0, 0])
+
+    return np.array([np.degrees(pitch_x), np.degrees(yaw_y), np.degrees(roll_z)], dtype=np.float64)
+
+
+def export_bone_hierarchy_jsonc(bone_names, parents, local_transforms,
+                                convert_to_opengl=True):
+    """Export bone hierarchy into CMPS346-compatible ECS entity JSON structure.
+
+    Args:
+        bone_names: list of unique string bone names.
+        parents: list of parent indices (-1 for root).
+        local_transforms: array of shape (B, 4, 4) local bone matrices.
+        convert_to_opengl: if True, converts positions from Blender to OpenGL.
+
+    Returns:
+        list of entity dictionaries suitable for JSON serialization.
+    """
+    if len(bone_names) != len(set(bone_names)):
+        raise ValueError("bone_names contains duplicate names")
+    if len(bone_names) != len(parents) or len(bone_names) != len(local_transforms):
+        raise ValueError("bone_names, parents, and local_transforms must have equal lengths")
+
+    n = len(bone_names)
+    for p in parents:
+        if p >= n or p < -1:
+            raise ValueError(f"Parent index {p} is out of bounds for {n} bones")
+
+    # Cycle detection
+    for i in range(n):
+        visited = set()
+        curr = i
+        while curr != -1:
+            if curr in visited:
+                raise ValueError(f"Cycle detected in bone hierarchy involving '{bone_names[curr]}'")
+            visited.add(curr)
+            curr = parents[curr]
+
+    entities = []
+    for i in range(n):
+        name = bone_names[i]
+        p_idx = parents[i]
+        parent_name = bone_names[p_idx] if p_idx != -1 else None
+
+        M = np.asarray(local_transforms[i], dtype=np.float64)
+        pos = M[:3, 3].copy()
+        if convert_to_opengl:
+            pos = blender_to_opengl_coords(pos)
+
+        R = M[:3, :3].copy()
+        euler_deg = matrix_to_euler_zxy_degrees(R)
+
+        scale = [float(np.linalg.norm(R[:, c])) for c in range(3)]
+        if all(np.isclose(s, 0.0) for s in scale):
+            scale = [1.0, 1.0, 1.0]
+
+        entity = {
+            "name": name,
+            "parent": parent_name,
+            "components": [],
+            "localTransform": {
+                "position": [float(x) for x in pos],
+                "rotation": [float(x) for x in euler_deg],
+                "scale": scale,
+            }
+        }
+        entities.append(entity)
+
+    return entities
+
+
+
 
