@@ -179,3 +179,160 @@ def compute_vertex_normals(vertices, faces, default_normal=(0.0, 1.0, 0.0)):
     return out_normals
 
 
+def write_mtl_file(filepath, material_name, diffuse_texture=None,
+                   ambient=(0.2, 0.2, 0.2), diffuse=(0.8, 0.8, 0.8),
+                   specular=(0.5, 0.5, 0.5), shininess=32.0):
+    """Write a standard Wavefront MTL material file compatible with CMPS346."""
+    os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
+    lines = [
+        f"# Material generated for CMPS346 OpenGL Engine",
+        f"newmtl {material_name}",
+        f"Ka {ambient[0]:.4f} {ambient[1]:.4f} {ambient[2]:.4f}",
+        f"Kd {diffuse[0]:.4f} {diffuse[1]:.4f} {diffuse[2]:.4f}",
+        f"Ks {specular[0]:.4f} {specular[1]:.4f} {specular[2]:.4f}",
+        f"Ns {shininess:.2f}",
+        "illum 2",
+    ]
+    if diffuse_texture:
+        lines.append(f"map_Kd {diffuse_texture}")
+    lines.append("")
+
+    with open(filepath, 'w', encoding='utf-8') as f:
+        f.write("\n".join(lines))
+
+
+def export_game_obj_frame(filepath, vertices, faces, uvs=None, normals=None,
+                          face_uv_indices=None, mtl_filename=None,
+                          material_name=None, convert_to_opengl=False):
+    """Write a single frame OBJ file with positions (v), UVs (vt), normals (vn),
+    and faces (f v/vt/vn).
+
+    Args:
+        filepath: output .obj path.
+        vertices: numpy array of shape (N, 3).
+        faces: list/array of face tuples/lists (e.g. [(0, 1, 2), ...]).
+        uvs: optional numpy array of shape (U, 2) or (N, 2).
+        normals: optional numpy array of shape (N, 3). If None and faces exist,
+                 normals will be auto-calculated using compute_vertex_normals.
+        face_uv_indices: optional list of face UV tuples matching faces topology.
+                         If None and uvs is provided, 1-to-1 vertex-to-UV mapping is assumed.
+        mtl_filename: optional relative/absolute mtl file path to include in mtllib.
+        material_name: optional material name to bind with usemtl.
+        convert_to_opengl: if True, converts positions and normals from Blender Z-up
+                           to OpenGL Y-up.
+    """
+    os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
+
+    verts = np.asarray(vertices, dtype=np.float64)
+    if verts.ndim != 2 or (verts.shape[0] > 0 and verts.shape[1] != 3):
+        raise ValueError(f"vertices must have shape (N, 3), got {verts.shape}")
+
+    if convert_to_opengl and len(verts) > 0:
+        verts = blender_to_opengl_coords(verts)
+
+    # Compute normals if not provided and geometry exists
+    if normals is None and len(verts) > 0 and len(faces) > 0:
+        norms = compute_vertex_normals(verts, faces)
+    elif normals is not None and len(normals) > 0:
+        norms = np.asarray(normals, dtype=np.float64)
+        if convert_to_opengl:
+            norms = blender_to_opengl_coords(norms)
+    else:
+        norms = None
+
+    has_uvs = (uvs is not None and len(uvs) > 0)
+    has_norms = (norms is not None and len(norms) > 0)
+
+    lines = [
+        f"# Exported for CMPS346 OpenGL Engine",
+    ]
+
+    if mtl_filename:
+        lines.append(f"mtllib {mtl_filename}")
+    if material_name:
+        lines.append(f"usemtl {material_name}")
+
+    # Write vertices
+    for x, y, z in verts:
+        lines.append(f"v {x:.6f} {y:.6f} {z:.6f}")
+
+    # Write texture coordinates
+    if has_uvs:
+        for u, v in uvs:
+            lines.append(f"vt {u:.6f} {v:.6f}")
+
+    # Write normals
+    if has_norms:
+        for nx, ny, nz in norms:
+            lines.append(f"vn {nx:.6f} {ny:.6f} {nz:.6f}")
+
+    # Write faces (1-based indexing in OBJ)
+    for f_idx, poly in enumerate(faces):
+        corners = []
+        poly_uvs = face_uv_indices[f_idx] if (face_uv_indices is not None and f_idx < len(face_uv_indices)) else None
+
+        for c_idx, v_idx in enumerate(poly):
+            v_num = v_idx + 1
+            vt_num = None
+            if has_uvs:
+                if poly_uvs is not None and c_idx < len(poly_uvs):
+                    vt_num = poly_uvs[c_idx] + 1
+                elif v_idx < len(uvs):
+                    vt_num = v_idx + 1
+
+            vn_num = (v_idx + 1) if has_norms else None
+
+            if vt_num is not None and vn_num is not None:
+                corners.append(f"{v_num}/{vt_num}/{vn_num}")
+            elif vt_num is not None:
+                corners.append(f"{v_num}/{vt_num}")
+            elif vn_num is not None:
+                corners.append(f"{v_num}//{vn_num}")
+            else:
+                corners.append(f"{v_num}")
+
+        lines.append("f " + " ".join(corners))
+
+    with open(filepath, 'w', encoding='utf-8') as f:
+        f.write("\n".join(lines) + "\n")
+
+
+def export_game_obj_sequence(dirpath, vertices, faces, uvs=None, normals=None,
+                             face_uv_indices=None, mtl_filename=None,
+                             material_name=None, convert_to_opengl=True):
+    """Write a sequence of OBJ files (0000.obj, 0001.obj, ...) for an animation.
+
+    Args:
+        dirpath: directory to store the OBJ sequence.
+        vertices: numpy array of shape (F, N, 3).
+        faces: list of face polygons.
+        uvs: optional UV array (U, 2).
+        normals: optional normals of shape (F, N, 3). If None, calculated per frame.
+        face_uv_indices: optional face UV loop indices.
+        mtl_filename: optional material library filename.
+        material_name: optional material name.
+        convert_to_opengl: if True, converts positions and normals to OpenGL Y-up.
+    """
+    os.makedirs(dirpath, exist_ok=True)
+    verts = np.asarray(vertices, dtype=np.float64)
+    if verts.ndim != 3:
+        raise ValueError(f"vertices sequence must have shape (F, N, 3), got {verts.shape}")
+
+    num_frames = verts.shape[0]
+    for f in range(num_frames):
+        frame_path = os.path.join(dirpath, f"{f:04d}.obj")
+        frame_norms = normals[f] if normals is not None else None
+        export_game_obj_frame(
+            frame_path,
+            verts[f],
+            faces,
+            uvs=uvs,
+            normals=frame_norms,
+            face_uv_indices=face_uv_indices,
+            mtl_filename=mtl_filename,
+            material_name=material_name,
+            convert_to_opengl=convert_to_opengl,
+        )
+
+
+
