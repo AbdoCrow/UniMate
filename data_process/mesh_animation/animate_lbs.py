@@ -55,22 +55,30 @@ from loguru import logger
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-from Animation import transforms_local  # noqa: E402
+try:
+    from Animation import transforms_local  # noqa: E402
+except ImportError:
+    transforms_local = None
 
-from data_process.mesh_animation.common import (  # noqa: E402
-    load_character,
-    npz_scalar,
-    parse_blender_argv,
-    quat_pos_to_mats,
-)
-from data_process.utils.blender_rig import (  # noqa: E402
-    compute_bone_keyframes,
-    export_animated_character,
-    find_skinned_meshes,
-    rebuild_action_from_data,
-    set_scene_timing,
-    update_scene,
-)
+try:
+    from data_process.mesh_animation.common import (  # noqa: E402
+        load_character,
+        npz_scalar,
+        parse_blender_argv,
+        quat_pos_to_mats,
+    )
+    from data_process.utils.blender_rig import (  # noqa: E402
+        compute_bone_keyframes,
+        export_animated_character,
+        find_skinned_meshes,
+        rebuild_action_from_data,
+        set_scene_timing,
+        update_scene,
+    )
+except ImportError:
+    load_character = npz_scalar = parse_blender_argv = quat_pos_to_mats = None
+    compute_bone_keyframes = export_animated_character = find_skinned_meshes = None
+    rebuild_action_from_data = set_scene_timing = update_scene = None
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +139,22 @@ def extract_skin(char_armature):
                          for poly in mesh.polygons)
         offset += len(mesh.vertices)
 
+    all_uvs = []
+    all_face_uvs = []
+    uv_offset = 0
+    for mesh_obj in meshes:
+        mesh = mesh_obj.data
+        if hasattr(mesh, 'uv_layers') and mesh.uv_layers and mesh.uv_layers.active:
+            uv_data = mesh.uv_layers.active.data
+            for poly in mesh.polygons:
+                poly_uv_indices = []
+                for loop_idx in poly.loop_indices:
+                    uv = uv_data[loop_idx].uv
+                    all_uvs.append((float(uv[0]), float(uv[1])))
+                    poly_uv_indices.append(uv_offset + len(poly_uv_indices))
+                all_face_uvs.append(tuple(poly_uv_indices))
+                uv_offset += len(poly.loop_indices)
+
     vertices = np.concatenate(all_verts)
     weights = np.concatenate(all_weights)
     sums = weights.sum(axis=1, keepdims=True)
@@ -148,11 +172,14 @@ def extract_skin(char_armature):
     if isinstance(order, str):
         order = json.loads(order)
 
+    uvs_arr = np.array(all_uvs, dtype=np.float32) if all_uvs else None
     return {
         'bone_names': bone_names, 'parents': parents,
         'rest_global': rest_global, 'rest_local': rest_local,
         'vertices': vertices, 'weights': weights, 'faces': all_faces,
         'arm_world': arm_world, 'canonical_order': order,
+        'uvs': uvs_arr,
+        'face_uv_indices': all_face_uvs if all_face_uvs else None,
     }
 
 
@@ -294,13 +321,30 @@ def lbs_deform(skin, anim_local, motion_rest_local, motion_bone_names):
 # Output
 # ---------------------------------------------------------------------------
 
-def save_obj_sequence(dirpath, vertices, faces):
+def save_obj_sequence(dirpath, vertices, faces, uvs=None, face_uv_indices=None,
+                      convert_to_opengl=True, export_collision=True):
+    from data_process.utils.game_export import (
+        export_game_obj_sequence,
+        compute_collision_bounds,
+    )
+    import json
+
     os.makedirs(dirpath, exist_ok=True)
-    face_lines = ["f " + " ".join(str(i + 1) for i in poly) for poly in faces]
-    for f in range(vertices.shape[0]):
-        with open(os.path.join(dirpath, f"{f:04d}.obj"), 'w') as fh:
-            fh.write("\n".join(f"v {x:.6f} {y:.6f} {z:.6f}" for x, y, z in vertices[f]))
-            fh.write("\n" + "\n".join(face_lines) + "\n")
+    export_game_obj_sequence(
+        dirpath,
+        vertices,
+        faces,
+        uvs=uvs,
+        face_uv_indices=face_uv_indices,
+        convert_to_opengl=convert_to_opengl,
+    )
+    if export_collision:
+        bounds = compute_collision_bounds(vertices, convert_to_opengl=convert_to_opengl)
+        collider_path = os.path.join(dirpath, "collider.json")
+        with open(collider_path, 'w', encoding='utf-8') as fh:
+            json.dump(bounds, fh, indent=2)
+        logger.info(f"Saved collision bounds to {collider_path}")
+
     logger.info(f"Saved {vertices.shape[0]} OBJ frames to {dirpath}")
 
 
@@ -335,7 +379,15 @@ def animate_lbs(char_path, anim_path, output_dir, dataset_type=None,
         logger.info(f"Saved LBS vertex animation: {out} "
                     f"(F={vertices.shape[0]}, V={vertices.shape[1]})")
     if 'obj' in save:
-        save_obj_sequence(os.path.join(output_dir, stem), vertices, skin['faces'])
+        save_obj_sequence(
+            os.path.join(output_dir, stem),
+            vertices,
+            skin['faces'],
+            uvs=skin.get('uvs'),
+            face_uv_indices=skin.get('face_uv_indices'),
+            convert_to_opengl=True,
+            export_collision=True,
+        )
     if rig_formats:
         # Rigged export via the same keyframe path animate_npz uses: the
         # relative keyframes inv(rest) @ anim land on the asset's own rest,
