@@ -109,3 +109,73 @@ def compute_collision_bounds(vertices, convert_to_opengl=False):
         }
     }
 
+
+def compute_vertex_normals(vertices, faces, default_normal=(0.0, 1.0, 0.0)):
+    """Calculate smooth area-weighted per-vertex normals for meshes or animation frames.
+
+    Args:
+        vertices: numpy array of shape (N, 3) or (F, N, 3).
+        faces: iterable of face tuples (e.g. [(0, 1, 2), (0, 2, 3), ...] or quads).
+        default_normal: fallback normal (tuple of 3 floats) for unreferenced or degenerate vertices.
+
+    Returns:
+        numpy array of shape (N, 3) or (F, N, 3) of unit-length normal vectors.
+    """
+    verts = np.asarray(vertices, dtype=np.float64)
+    if verts.ndim == 0 or verts.shape[-1] != 3:
+        raise ValueError(f"vertices must have last dimension 3, got shape {verts.shape}")
+
+    is_single_frame = (verts.ndim == 2)
+    if is_single_frame:
+        frames = verts[None, ...]
+    elif verts.ndim == 3:
+        frames = verts
+    else:
+        raise ValueError(f"vertices must have 2 or 3 dimensions, got {verts.ndim}")
+
+    num_frames, num_verts, _ = frames.shape
+    def_norm = np.asarray(default_normal, dtype=np.float64)
+    def_norm = def_norm / (np.linalg.norm(def_norm) + 1e-12)
+
+    # Triangulate any n-gon faces into triangles
+    triangles = []
+    for face in faces:
+        if len(face) < 3:
+            continue
+        elif len(face) == 3:
+            triangles.append((face[0], face[1], face[2]))
+        else:
+            v0 = face[0]
+            for k in range(1, len(face) - 1):
+                triangles.append((v0, face[k], face[k + 1]))
+
+    out_normals = np.zeros((num_frames, num_verts, 3), dtype=np.float64)
+
+    if len(triangles) > 0 and num_verts > 0:
+        tri_arr = np.array(triangles, dtype=np.int64)
+        idx0 = tri_arr[:, 0]
+        idx1 = tri_arr[:, 1]
+        idx2 = tri_arr[:, 2]
+
+        for f in range(num_frames):
+            frame_verts = frames[f]
+            e1 = frame_verts[idx1] - frame_verts[idx0]
+            e2 = frame_verts[idx2] - frame_verts[idx0]
+            fn = np.cross(e1, e2)
+
+            np.add.at(out_normals[f], idx0, fn)
+            np.add.at(out_normals[f], idx1, fn)
+            np.add.at(out_normals[f], idx2, fn)
+
+            norms = np.linalg.norm(out_normals[f], axis=-1, keepdims=True)
+            valid = (norms[:, 0] > 1e-12)
+            out_normals[f, valid] /= norms[valid]
+            out_normals[f, ~valid] = def_norm
+    else:
+        out_normals[:] = def_norm
+
+    if is_single_frame:
+        return out_normals[0]
+    return out_normals
+
+
