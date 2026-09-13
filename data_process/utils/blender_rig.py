@@ -18,18 +18,92 @@ The counterpart for the *export* direction (Blender scene → NPZ) lives in
 import os
 import re
 
-import bpy
-import bmesh  # registered by ``import bpy`` when running on the pip bpy module
+try:
+    import bpy
+    import bmesh  # registered by ``import bpy`` when running on the pip bpy module
+except ImportError:
+    bpy = None
+    bmesh = None
+
 import numpy as np
 from loguru import logger
-from mathutils import Matrix, Quaternion
 
-from data_process.utils.blender_export import (
-    bind_action,
-    clear_animation_state,
-)
+try:
+    from mathutils import Matrix, Quaternion
+except ImportError:
+    Matrix = Quaternion = None
+
+try:
+    from data_process.utils.blender_export import (
+        bind_action,
+        clear_animation_state,
+    )
+except ImportError:
+    bind_action = clear_animation_state = None
 
 RECONSTRUCTED_ACTION_NAME = "Reconstructed_Action"
+
+
+def calculate_decimate_ratio(current_triangles, max_triangles):
+    """Calculate the ratio for Blender's COLLAPSE decimation modifier.
+
+    Returns:
+        float ratio in (0.0, 1.0] if decimation is needed, or 1.0 if not needed.
+    Raises:
+        ValueError if max_triangles <= 0 or current_triangles < 0.
+    """
+    if max_triangles <= 0:
+        raise ValueError(f"max_triangles must be positive, got {max_triangles}")
+    if current_triangles < 0:
+        raise ValueError(f"current_triangles cannot be negative, got {current_triangles}")
+    if current_triangles <= max_triangles:
+        return 1.0
+    return float(max_triangles) / float(current_triangles)
+
+
+def decimate_mesh_for_game(obj, max_triangles=4000, apply_modifier=False):
+    """Add a game-oriented decimate modifier to reduce polycount for real-time rendering.
+
+    Rules:
+    - Does nothing if current face/poly count is <= max_triangles.
+    - Adds a DECIMATE modifier with type 'COLLAPSE'.
+    - Preserves UVs and vertex groups (native Blender DECIMATE preserves UVs).
+    - If apply_modifier is True and Blender context permits, applies the modifier.
+    - Logs helpful information.
+
+    Args:
+        obj: Blender mesh Object (or compatible mock).
+        max_triangles: Maximum desired triangle/polygon count (int > 0).
+        apply_modifier: Whether to bake/apply the modifier immediately into the mesh.
+
+    Returns:
+        The created modifier, or None if no decimation was needed.
+    """
+    if not hasattr(obj, 'data') or not hasattr(obj.data, 'polygons'):
+        logger.warning(f"Object {getattr(obj, 'name', obj)} has no mesh polygons data; skipping decimation")
+        return None
+
+    current_faces = len(obj.data.polygons)
+    ratio = calculate_decimate_ratio(current_faces, max_triangles)
+    if ratio >= 1.0:
+        logger.info(f"Mesh '{getattr(obj, 'name', obj)}' has {current_faces} faces, below or equal to target {max_triangles}; no decimation needed")
+        return None
+
+    mod = obj.modifiers.new(name="GameDecimate", type='DECIMATE')
+    mod.decimate_type = 'COLLAPSE'
+    mod.ratio = ratio
+    logger.info(f"Decimating mesh '{getattr(obj, 'name', obj)}' from {current_faces} to ~{max_triangles} faces (ratio={ratio:.4f})")
+
+    if apply_modifier and bpy is not None and hasattr(bpy, 'ops'):
+        try:
+            bpy.context.view_layer.objects.active = obj
+            bpy.ops.object.modifier_apply(modifier=mod.name)
+            logger.info(f"Applied GameDecimate modifier to '{obj.name}'")
+        except Exception as exc:
+            logger.warning(f"Could not apply GameDecimate modifier immediately: {exc}")
+
+    return mod
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
